@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minimalist Chat</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom scrollbar for chat window */
+        #messages {
+            /* Fix height for chat window */
+            max-height: 70vh;
+            overflow-y: auto;
+            scroll-behavior: smooth;
+        }
+        #messages::-webkit-scrollbar {
+            width: 8px;
+        }
+        #messages::-webkit-scrollbar-thumb {
+            background-color: #9ca3af;
+            border-radius: 4px;
+        }
+        #messages::-webkit-scrollbar-track {
+            background-color: #f3f4f6;
+        }
+    </style>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-gray-50 flex items-center justify-center min-h-screen p-4 font-sans">
+
+    <div id="app" class="w-full max-w-lg bg-white shadow-2xl rounded-xl flex flex-col h-[90vh]">
+        
+        <!-- Header -->
+        <header class="bg-indigo-600 p-4 rounded-t-xl shadow-md">
+            <h1 class="text-xl font-bold text-white text-center">Chat Canvas 💬</h1>
+        </header>
+
+        <!-- Message Container -->
+        <div id="messages" class="flex-grow p-4 space-y-4 overflow-y-auto">
+            <!-- Messages will be rendered here -->
+            <div id="initial-loading" class="text-center text-gray-500 p-8">
+                Loading chat history...
+            </div>
+        </div>
+
+        <!-- Typing Indicator Area -->
+        <div id="typing-indicator" class="p-3 text-sm text-gray-600 bg-gray-100 border-t">
+            <!-- Typing users will be displayed here -->
+            <span class="font-medium">Status:</span> No one is typing.
+        </div>
+
+        <!-- Input Area -->
+        <div class="p-4 border-t border-gray-200">
+            <div id="concurrency-warning" class="hidden mb-2 text-sm p-2 rounded-lg bg-yellow-100 text-yellow-800">
+                ⚠️ Another user is currently sending a message. Please wait a moment...
+            </div>
+            <div class="flex space-x-2">
+                <!-- Removed inline oninput handler -->
+                <input type="text" id="message-input" placeholder="Type a message..."
+                    class="flex-grow p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                <button id="send-button" onclick="sendMessage()"
+                    class="bg-indigo-600 text-white p-3 rounded-lg font-semibold hover:bg-indigo-700 transition duration-150 disabled:bg-indigo-400 disabled:cursor-not-allowed">
+                    Send
+                </button>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Firebase Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, collection, query, orderBy, addDoc, onSnapshot, updateDoc, setDoc, deleteDoc, serverTimestamp, runTransaction, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase Configuration
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-chat-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        // FIX 1: Renamed the local variable to avoid conflict with the global declaration timing
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null; 
+
+        let app, db, auth, userId = null;
+        let userName;
+        let isSending = false; // Local state lock for sending
+
+        setLogLevel('error'); // Set error logging for cleaner console output
+
+        const MESSAGES_COLLECTION = `artifacts/${appId}/public/data/chat_messages`;
+        const STATUS_DOC_PATH = `artifacts/${appId}/public/data/status/app_status`;
+
+        // Utility function to generate a random fun name
+        function generateRandomName() {
+            const adjectives = ['Cool', 'Quick', 'Silly', 'Brave', 'Smart', 'Funny', 'Clever', 'Witty', 'Sunny', 'Dark'];
+            const nouns = ['Panda', 'Robot', 'Wizard', 'Ninja', 'Pilot', 'Gamer', 'Coder', 'Sailor', 'Comet', 'Star'];
+            const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
+            const noun = nouns[Math.floor(Math.random() * nouns.length)];
+            const number = Math.floor(Math.random() * 99) + 1;
+            return `${adj}${noun}${number}`;
+        }
+
+        // Debounce utility function
+        function debounce(func, timeout = 300) {
+            let timer;
+            return (...args) => {
+                clearTimeout(timer);
+                timer = setTimeout(() => { func.apply(this, args); }, timeout);
+            };
+        }
+
+        // --- CORE INITIALIZATION ---
+        const initFirebase = async () => {
+            if (Object.keys(firebaseConfig).length === 0) {
+                console.error("Firebase config is missing. Cannot initialize app.");
+                return;
+            }
+
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Sign in with custom token if available, otherwise sign in anonymously
+                if (initialAuthToken) { // Using the renamed variable
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        userName = generateRandomName();
+                        document.getElementById('initial-loading').textContent = `Welcome, ${userName}! Loading chat...`;
+
+                        // Start listeners after successful auth
+                        listenForMessages();
+                        listenForStatus();
+                        
+                    } else {
+                        console.log("No user signed in.");
+                        document.getElementById('initial-loading').textContent = 'Please refresh to sign in.';
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase initialization or authentication failed:", error);
+                document.getElementById('initial-loading').textContent = 'Error loading app. Check console.';
+            }
+        };
+
+        // --- CONCURRENCY LOCK LOGIC ---
+
+        // Attempt to acquire the lock using a transaction
+        const acquireLock = async (currentUserId) => {
+            const statusRef = doc(db, STATUS_DOC_PATH);
+
+            try {
+                let lockAcquired = false;
+                await runTransaction(db, async (transaction) => {
+                    const statusDoc = await transaction.get(statusRef);
+                    const lockHolderId = statusDoc.data()?.lockHolderId;
+
+                    // If no lock or lock held by me, acquire it
+                    if (!lockHolderId || lockHolderId === currentUserId) {
+                        transaction.set(statusRef, { lockHolderId: currentUserId, lockTimestamp: serverTimestamp() }, { merge: true });
+                        lockAcquired = true;
+                    } else {
+                        // Lock is held by someone else
+                        lockAcquired = false;
+                    }
+                });
+                return lockAcquired;
+            } catch (e) {
+                console.error("Transaction failed: ", e);
+                return false;
+            }
+        };
+
+        // Release the lock
+        const releaseLock = async (currentUserId) => {
+            const statusRef = doc(db, STATUS_DOC_PATH);
+            try {
+                 await runTransaction(db, async (transaction) => {
+                    const statusDoc = await transaction.get(statusRef);
+                    const lockHolderId = statusDoc.data()?.lockHolderId;
+
+                    // Only release if I hold the lock
+                    if (lockHolderId === currentUserId) {
+                        transaction.update(statusRef, { lockHolderId: null, lockTimestamp: null });
+                    }
+                });
+            } catch (e) {
+                console.error("Error releasing lock: ", e);
+            }
+        };
+
+        // --- MESSAGE SENDING ---
+        window.sendMessage = async () => {
+            if (!userId || isSending) return;
+
+            const inputElement = document.getElementById('message-input');
+            const content = inputElement.value.trim();
+            if (!content) return;
+
+            const sendButton = document.getElementById('send-button');
+            const concurrencyWarning = document.getElementById('concurrency-warning');
+            
+            // Set local sending state
+            isSending = true;
+            sendButton.disabled = true;
+            sendButton.textContent = 'Sending...';
+
+            // 1. Attempt to acquire the lock
+            const lockAcquired = await acquireLock(userId);
+
+            if (lockAcquired) {
+                // Hide warning if we acquired the lock
+                concurrencyWarning.classList.add('hidden');
+                try {
+                    // 2. Add the message
+                    await addDoc(collection(db, MESSAGES_COLLECTION), {
+                        userId: userId,
+                        userName: userName,
+                        content: content,
+                        timestamp: serverTimestamp(),
+                        appId: appId
+                    });
+
+                    inputElement.value = ''; // Clear input on success
+                    await updateTypingStatus(false); // Stop typing immediately
+
+                } catch (e) {
+                    console.error("Error adding document: ", e);
+                } finally {
+                    // 3. Release the lock
+                    await releaseLock(userId);
+                }
+            } else {
+                // Lock held by someone else, show warning
+                concurrencyWarning.classList.remove('hidden');
+            }
+
+            // Reset local state and UI
+            isSending = false;
+            sendButton.disabled = false;
+            sendButton.textContent = 'Send';
+        };
+
+        // --- TYPING STATUS HANDLERS ---
+        const updateTypingStatus = async (isTyping) => {
+            if (!userId) return;
+
+            const statusRef = doc(db, STATUS_DOC_PATH);
+            
+            // Use setDoc with merge to ensure the path exists and only update our user's status
+            await setDoc(statusRef, { 
+                typingUsers: {
+                    [userId]: {
+                        userName: userName,
+                        isTyping: isTyping,
+                        timestamp: isTyping ? serverTimestamp() : null,
+                    }
+                }
+            }, { merge: true });
+        };
+
+        const debouncedStopTyping = debounce(() => updateTypingStatus(false), 2500);
+
+        // FIX 2: Made handleTyping a module-scoped function
+        const handleTyping = () => {
+            const input = document.getElementById('message-input');
+            if (input.value.length > 0) {
+                updateTypingStatus(true);
+            }
+            debouncedStopTyping();
+        };
+
+
+        // --- REAL-TIME LISTENERS ---
+
+        // 1. Listen for new messages
+        const listenForMessages = () => {
+            const messagesRef = collection(db, MESSAGES_COLLECTION);
+            const q = query(messagesRef, orderBy('timestamp', 'asc'));
+
+            onSnapshot(q, (snapshot) => {
+                const messagesContainer = document.getElementById('messages');
+                messagesContainer.innerHTML = ''; // Clear container
+
+                snapshot.docs.forEach((d) => {
+                    const data = d.data();
+                    const isCurrentUser = data.userId === userId;
+                    
+                    const messageEl = document.createElement('div');
+                    messageEl.className = isCurrentUser
+                        ? 'flex justify-end'
+                        : 'flex justify-start';
+
+                    const bubbleClasses = isCurrentUser
+                        ? 'bg-indigo-500 text-white rounded-bl-xl rounded-t-xl'
+                        : 'bg-gray-200 text-gray-800 rounded-br-xl rounded-t-xl';
+                        
+                    const time = data.timestamp?.toDate ? data.timestamp.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '...';
+
+                    messageEl.innerHTML = `
+                        <div class="max-w-xs lg:max-w-md">
+                            <div class="text-xs ${isCurrentUser ? 'text-right text-gray-600' : 'text-left text-gray-500'} mb-1">${isCurrentUser ? 'You' : data.userName}</div>
+                            <div class="${bubbleClasses} p-3 shadow-md inline-block">
+                                <p class="text-sm">${data.content}</p>
+                                <div class="text-xs opacity-75 mt-1 ${isCurrentUser ? 'text-right' : 'text-left'}">${time}</div>
+                            </div>
+                        </div>
+                    `;
+                    messagesContainer.appendChild(messageEl);
+                });
+                // Scroll to bottom
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+                // Hide loading text after first load
+                document.getElementById('initial-loading').classList.add('hidden');
+            });
+        };
+
+        // 2. Listen for status changes (typing and lock)
+        const listenForStatus = () => {
+            const statusRef = doc(db, STATUS_DOC_PATH);
+
+            onSnapshot(statusRef, (docSnapshot) => {
+                if (docSnapshot.exists()) {
+                    const data = docSnapshot.data();
+                    const lockHolderId = data.lockHolderId;
+                    const typingUsers = data.typingUsers || {};
+                    const sendButton = document.getElementById('send-button');
+                    const concurrencyWarning = document.getElementById('concurrency-warning');
+                    const typingIndicator = document.getElementById('typing-indicator');
+
+                    // --- Lock Status ---
+                    if (lockHolderId && lockHolderId !== userId) {
+                        // Lock is held by someone else, disable sending
+                        sendButton.disabled = true;
+                        concurrencyWarning.textContent = `⚠️ ${typingUsers[lockHolderId]?.userName || 'Another user'} is currently sending a message. Please wait...`;
+                        concurrencyWarning.classList.remove('hidden');
+                    } else if (!isSending) {
+                        // Lock is free and we are not in the process of sending
+                        sendButton.disabled = false;
+                        concurrencyWarning.classList.add('hidden');
+                    }
+
+                    // --- Typing Status ---
+                    const typingUserNames = Object.keys(typingUsers)
+                        .filter(uid => {
+                            // Filter out self and users whose status is not true or is stale (5 seconds)
+                            if (uid === userId || !typingUsers[uid].isTyping) return false;
+                            
+                            const timestamp = typingUsers[uid].timestamp?.toDate();
+                            if (!timestamp) return false;
+
+                            return (Date.now() - timestamp.getTime()) < 5000;
+                        })
+                        .map(uid => typingUsers[uid].userName);
+
+                    if (typingUserNames.length > 0) {
+                        const names = typingUserNames.join(', ');
+                        const isAre = typingUserNames.length === 1 ? 'is' : 'are';
+                        typingIndicator.innerHTML = `<span class="font-medium text-indigo-700">${names}</span> ${isAre} typing...`;
+                    } else {
+                        typingIndicator.innerHTML = '<span class="font-medium">Status:</span> No one is typing.';
+                    }
+
+                }
+            }, (error) => {
+                console.error("Error listening to status: ", error);
+            });
+        };
+
+        // FIX 2: Attach event listener directly to the input element after the DOM is ready
+        document.addEventListener('DOMContentLoaded', () => {
+            const inputElement = document.getElementById('message-input');
+            if (inputElement) {
+                inputElement.addEventListener('input', handleTyping);
+            }
+        });
+
+        // Start the app!
+        initFirebase();
+
+    </script>
+</body>
+</html>
